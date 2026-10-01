@@ -1,0 +1,85 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fitplan}
+      POSTGRES_USER: ${POSTGRES_USER:-fitplan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
+    volumes:
+      - fitplan-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [fitplan-internal]
+
+  migrate:
+    build:
+      context: .
+      target: builder
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fitplan}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}@db:5432/${POSTGRES_DB:-fitplan}?schema=public
+    command: ["sh", "-c", "pnpm exec prisma migrate deploy && pnpm db:seed"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [fitplan-internal]
+
+  app:
+    build:
+      context: .
+      target: runner
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fitplan}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}@db:5432/${POSTGRES_DB:-fitplan}?schema=public
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      FITPLAN_UPLOAD_DIR: /app/private-uploads
+    expose:
+      - "3000"
+    volumes:
+      - fitplan-uploads:/app/private-uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [fitplan-internal]
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      FITPLAN_DOMAIN: ${FITPLAN_DOMAIN:?Set FITPLAN_DOMAIN in .env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [fitplan-internal]
+
+volumes:
+  fitplan-db:
+  fitplan-uploads:
+  caddy-data:
+  caddy-config:
+
+networks:
+  fitplan-internal:
+    driver: bridge
